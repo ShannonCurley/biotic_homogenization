@@ -1,0 +1,998 @@
+---
+title: "BH_Code_2024"
+author: "Shannon Curley"
+date: "2024-02-27"
+output: html_document
+---
+
+
+```{r}
+###########################################################################################
+### STEP 1 - FILTERING BBS Data
+###########################################################################################
+library(dplyr) #df manipulation
+library(vroom) #csv import
+
+
+setwd("~/Desktop/BH_June_2023/State_data") #where BBS state data (all states) stored
+
+### List all state data
+file_list<-list.files()
+
+### import al state data
+BBS_df <- vroom(file_list) ###6,946,871 obs
+
+### Convert to data frame
+BBS_df<-as.data.frame(BBS_df)
+
+###Convert StateNum to numeric to avoid confusion
+BBS_df$StateNum<-as.numeric(BBS_df$StateNum)
+
+###Grab only Northeastern States (StateNum): Rhode Island (77), Connecticut (18), Vermont (87), Delaware (21), Maine (44), Maryland (46), Massachusetts (47), New Hampshire (58), New Jersey (59), New York (61), Pennsylvania (72) 
+States<-c(77, 18, 87, 21, 44, 46, 47, 58, 59, 61, 72)
+
+### Grab the columns that we need
+BH_BBS<-as.data.frame(BBS_df %>% dplyr::filter(StateNum %in% States)) #1,112,732 obs
+
+###clean
+rm(BBS_df)
+
+### Grab the columns that we need
+BH_BBS<-as.data.frame(BH_BBS %>% dplyr::filter(Year>=1990)) #685,877
+BH_BBS<-as.data.frame(BH_BBS %>% dplyr::filter(Year<=2019)) #667,469
+BH_BBS$Route<-as.numeric(BH_BBS$Route)
+BH_BBS$AOU<-as.numeric(BH_BBS$AOU)
+
+### Add unique route number
+BH_BBS$Route_ID<-((BH_BBS$CountryNum*100000)+(BH_BBS$StateNum*1000)+(BH_BBS$Route))
+
+#####################################################################
+###  REMOVE Unidentified and Hybrid species
+#####################################################################
+
+routes <- read.csv("~/Desktop/BH_June_2023/routes.csv") ### Route level info from USGS BBS
+BBS_AOU_2021 <- read.csv("~/Desktop/BH_June_2023/BBS_AOU_2021.csv") ### Species level info from 2021
+
+### Attach route info
+BH_BBS<-left_join(BH_BBS, routes)
+
+### Official BBS sampling protocol used ==RPID == 101, retain only those routes
+BH_BBS<-dplyr::filter(BH_BBS, RPID==101) # 665,275 observations
+
+### Add common and scientific name from AOU meta data
+BH_BBS<-left_join(BH_BBS, BBS_AOU_2021)
+
+### Grad Common name and scientific names
+bbs_species<-select(BH_BBS, English_Common_Name, Gen_spe)
+bbs_species<-unique(bbs_species) #visually inspect
+
+setwd("~/Desktop/BH_June_2023")
+#write.csv(bbs_species, file="bbs_species_2023.csv", row.names = FALSE)
+
+### Remove hybrid and unidentified species
+bbs_to_remove<-c("Brewster's Warbler (Golden-winged x Blue-winged)", "Lawrence's Warbler (Golden-winged x Blue-winged)","unid. Accipiter hawk", "unid. Alder Flycatcher / Willow Flycatcher","unid. American Crow / Fish Crow",
+"unid. Bullock's Oriole / Baltimore Oriole","unid. Buteo hawk","unid. Carolina Chickadee / Black-capped Chickadee","unid. Eastern Meadowlark / Western Meadowlark","unid. Empidonax flycatcher","unid. gull","unid. Red Crossbill / White-winged Crossbill","unid. tern","unid. woodpecker","unid. Yellow-billed Cuckoo / Black-billed Cuckoo")
+
+bbs_species_filtered<-bbs_species %>% filter(!English_Common_Name %in% bbs_to_remove) #244 species 
+
+bbs_species_filtered<-bbs_species_filtered$English_Common_Name
+
+BH_BBS<-filter(BH_BBS, English_Common_Name %in% bbs_species_filtered) #664,548 observations
+
+### check length(unique(BH_BBS$English_Common_Name)) -- 244 YES.
+
+
+### Convert subspecies to species
+#(Myrtle Warbler) Yellow-rumped Warbler	 #Setophaga coronata coronata
+#(Slate-colored Junco) Dark-eyed Junco	#Junco hyemalis hyemalis
+#(Yellow-shafted Flicker) Northern Flicker	#Colaptes auratus auratus
+
+# Yellow-rumped Warbler
+BH_BBS$English_Common_Name[BH_BBS$English_Common_Name=="(Myrtle Warbler) Yellow-rumped Warbler"]<-"Yellow-rumped Warbler"
+BH_BBS$Gen_spe[BH_BBS$Gen_spe=="Setophaga coronata coronata"]<-"Setophaga coronata"
+
+# Dark-eyed Junco
+BH_BBS$English_Common_Name[BH_BBS$English_Common_Name=="(Slate-colored Junco) Dark-eyed Junco"]<-"Dark-eyed Junco"
+BH_BBS$Gen_spe[BH_BBS$Gen_spe=="Junco hyemalis hyemalis"]<-"Junco hyemalis"
+
+# Northern Flicker
+BH_BBS$English_Common_Name[BH_BBS$English_Common_Name=="(Yellow-shafted Flicker) Northern Flicker"]<-"Northern Flicker"
+BH_BBS$Gen_spe[BH_BBS$Gen_spe=="Colaptes auratus auratus"]<-"Colaptes auratus"
+
+#check
+
+bbs_species_ch<-select(BH_BBS, English_Common_Name, Gen_spe)
+bbs_species_ch<-unique(bbs_species_ch) #visually inspected -- YES.
+
+
+#####################################################################
+### 2 FIND CONSISTANTLY RUN ROUTES for BBS
+#####################################################################
+
+#Declarations
+route_list<-sort(unique(BH_BBS$Route_ID)) #539 unique BBS routes during this time period
+yearlist<-c(1990:2019)
+df = data.frame() #appendable dataframe, for 30 years worth of data
+
+#Outer loop - subset by route
+for (i in 1:(length(route_list))){
+by_route<-dplyr::filter(BH_BBS, Route_ID == route_list[i])
+#inner loop subset by year
+  years_run<-length(yearlist)
+  
+  for (k in 1:(length(yearlist))){
+  by_year<-dplyr::filter(by_route, Year == yearlist[k])
+  years_run[k]<-nrow(by_year)
+  years_run_df<-as.data.frame(years_run)
+  x<-t(years_run_df)
+  
+  
+  }
+             
+df=rbind(df, x)
+
+}
+  
+
+colnames(df)<-yearlist
+df<-cbind(df, route_list)
+
+###FIND Routes missing no more than two years of data
+
+max_runs<-length(nrow(df))
+
+###Loop goes row by row and counts the number of runs of zero
+for (i in 1:(nrow(df))){
+  y <- rle(df[i,])
+  runs<-y$lengths[y$values==0]
+  try(max_runs[i]<-max(runs), silent = T)
+}
+  
+### Replace all NA with 0
+max_runs<-as.numeric(gsub("-Inf", 0, max_runs))
+
+###counts the highest numbers of runs of zero
+df$max_runs<-max_runs
+
+### Remove all routes missing more than 2 consecutive years of data
+df2<-dplyr::filter(df, max_runs <= 2)
+
+###This leaves us with only 182 routes :(
+BBS_route_list<-df2$route_list
+
+### remove inconsistently run routes
+Filtered_BBS<-BH_BBS%>% filter(Route_ID %in% BBS_route_list) ###327,684 obs
+
+### Add the route level info from BBS
+Filtered_BBS<-left_join(Filtered_BBS, routes)
+
+###
+setwd("~/Desktop/BH_June_2023/Filtered_BH_2023")
+
+
+write.csv(Filtered_BBS, file="BBS_Filtered_2023.csv", row.names = F) #data file with BBS routes for 11 states missing no more than 2 consecutive years of survey data with hybrid and unknown species removed, and subspecies converted to species
+
+
+### Clean the Global Environment 
+
+
+###########################################################################################
+### STEP 3 - FILTERING CBC Data
+###########################################################################################
+setwd("~/Desktop/BH_June_2023/CBC_data") #directory where all CBC data is stored
+
+CBC_df <- as.data.frame(list.files(full.names = TRUE) %>% 
+  lapply(read_csv) %>% 
+  bind_rows)  ###5,816,475 observations 
+
+### Filter by Subnational_code Rhode Island ("US-RI"), Connecticut ("US-CT"), Vermont ("US-VT"), Delaware ("US-DE"), Maine ("US-ME"), Maryland ("US-MD"), Massachusetts ("us-ma"  "US-MA"), New Hampshire ("US-NH"), New Jersey ("US-NJ"), New York ("US-NY"), Pennsylvania ("US-PA")
+
+CBC_states<-c("US-RI","US-CT","US-VT","US-DE","US-ME","US-MD","us-ma", "US-MA", "US-NH","US-NJ","US-NY","US-PA") #note that mistake was found in CBC original data on website, for "us-ma" AND "US-MA" 
+
+BH_CBC<-as.data.frame(CBC_df %>% filter(Subnational_code %in% CBC_states)) #865,185 observations
+
+###Clean
+rm(CBC_df)
+
+###Make a new column for count year to make life easier for comparison
+BH_CBC$Year<-BH_CBC$Count_yr+1900  ### This converts to year to make comparable to bbs, now we want count years 90 (dec 1989 - jan 1990) on (to match with BBS 1990), therefore comparisons are from the winter 1990 to breeding season 1990
+
+###filter by year
+BH_CBC<-as.data.frame(BH_CBC %>% filter(Year >= 1990)) #696,324 observations
+BH_CBC<-as.data.frame(BH_CBC %>% filter(Year <= 2020))
+
+###Grab cols that we need in same order of BBS data
+BH_CBC<-as.data.frame(BH_CBC %>% select(Abbrev,Year,how_many,COM_NAME, SCI_NAME, Latitude, Longitude))
+
+###Add season col
+BH_CBC$Season<-c("Winter")
+
+### Change column name to match BBS
+colnames(BH_CBC)[1]<-c("Route_ID")
+colnames(BH_CBC)[2]<-c("Year")
+colnames(BH_CBC)[3]<-c("SpeciesTotal")
+colnames(BH_CBC)[4:5]<-c("English_Common_Name","Gen_spe")
+
+### Visuallt inspect species list
+CBC_species<-select(BH_CBC, English_Common_Name, Gen_spe)
+CBC_species<-unique(CBC_species) #613 species
+
+
+setwd("~/Desktop/BH_June_2023")
+#write.csv(CBC_species, file = "cbc_species_unfiltered.csv", row.names = F)
+
+
+#####################################################################
+### STEP 4 - FIND CONSISTANTLY RUN ROUTES for BBS
+#####################################################################
+
+route_list<-sort(unique(BH_CBC$Route_ID)) #377 routes
+yearlist<-c(1990:2019)
+df<-data.frame()
+
+#Outer loop - subset by route
+for (i in 1:(length(route_list))){
+by_route<-dplyr::filter(BH_CBC, Route_ID == route_list[i])
+
+#inner loop subset by year
+  years_run<-length(yearlist)
+  
+  for (k in 1:(length(yearlist))){
+  by_year<-dplyr::filter(by_route, Year == yearlist[k])
+  years_run[k]<-nrow(by_year)
+  years_run_df<-as.data.frame(years_run)
+  
+  x<-t(years_run_df)
+  
+  }
+             
+df=rbind(df, x)
+
+} # End out loop
+  
+colnames(df)<-yearlist #add column names 
+df<-cbind(df, route_list)
+
+###FIND Routes missing no more than two years of data
+
+max_runs<-length(nrow(df))
+
+###Loop goes row by row and counts the number of runs of zero
+for (i in 1:(nrow(df))){
+  y <- rle(df[i,])
+  runs<-y$lengths[y$values==0]
+  try(max_runs[i]<-max(runs), silent = T)
+}
+  
+### Replace all "-Inf" with 0 <- this means there were no years when I circle wasn't surveyed
+max_runs<-as.numeric(gsub("-Inf", 0, max_runs))
+
+###counts the highest numbers of runs of zero
+df$max_runs<-max_runs
+
+### Remove all routes missing more than 2 consecutive years of data
+df2<-dplyr::filter(df, max_runs <= 2)
+
+###This leaves us with 257 cbc circles. 257-182 = a difference of 75 routes
+CBC_route_list<-df2$route_list
+
+### Filter out inconsistantly run routes
+Filtered_CBC<-BH_CBC %>% dplyr::filter(Route_ID %in% CBC_route_list) ###601,179 obs
+
+### write filtered CBC file
+write.csv(Filtered_CBC, file="CBC_Filtered_2023.csv", row.names = F) 
+
+
+CBC_Filtered_2023<-CBC_Filtered_2023[!grepl("sp.", CBC_Filtered_2023),]
+
+
+#american kestrel
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="American Kestrel (Northern)"]<-"American Kestrel"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm=="Falco sparverius [sparverius Group]"]<-"Falco sparverius" #OK
+
+#Barn owl
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Barn Owl (American)"]<-"Barn Owl"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm=="Tyto alba [furcata Group]"]<-"Tyto alba" #OK
+
+#Barred owl
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Barred Owl (Northern)"]<-"Barred Owl"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Strix varia [varia Group]"]<-"Strix varia" #OK
+
+#Guillemot
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Black Guillemot (grylle Group)"]<-"Black Guillemot"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Cepphus grylle [grylle Group]"]<-"Cepphus grylle" #OK
+
+#Blue-gray Gnatcatcher
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Blue-gray Gnatcatcher (caerulea)"]<-"Blue-gray Gnatcatcher"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Polioptila caerulea caerulea"]<-"Polioptila caerulea" #OK 
+
+#Brant
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Brant (Atlantic)"]<-"Brant"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Branta bernicla hrota"]<-"Branta bernicla" 
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Brant (Black)"]<-"Brant"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Branta bernicla nigricans/orientalis"]<-"Branta bernicla" #OK  
+
+#Brown Pelican
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Brown Pelican (Atlantic)"]<-"Brown Pelican"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Pelecanus occidentalis carolinensis"]<-"Pelecanus occidentalis" #OK 
+
+#Cackling Goose
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Cackling Goose (Richardson's)"]<-"Cackling Goose"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Branta hutchinsii hutchinsiis"]<-"Branta hutchinsii" #OK 
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Cackling Goose (Richardson's)"]<-"Cackling Goose"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Branta hutchinsii hutchinsii"]<-"Branta hutchinsii" #OK 
+
+
+
+#Clapper Rail
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Clapper Rail (Atlantic Coast)"]<-"Clapper Rail"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Rallus crepitans crepitans/waynei"]<-"Rallus crepitans" #OK 
+
+
+#Common Eider
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Common Eider (Dresser's)"]<-"Common Eider"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Somateria mollissima dresseri"]<-"Somateria mollissima" #OK 
+
+
+#Common Grackle
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Common Grackle (Purple)"]<-"Common Grackle"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Quiscalus quiscula quiscula/stonei"]<-"Quiscalus quiscula" #OK 
+
+#Dark-eyed Junco
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Dark-eyed Junco (Oregon)"]<-"Dark-eyed Junco"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Dark-eyed Junco (Pink-sided)"]<-"Dark-eyed Junco"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Dark-eyed Junco (Slate-colored)"]<-"Dark-eyed Junco"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Dark-eyed Junco (White-winged)"]<-"Dark-eyed Junco"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Junco hyemalis [oreganus Group]"]<-"Junco hyemalis"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Junco hyemalis mearnsi"]<-"Junco hyemalis"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Junco hyemalis hyemalis/carolinensis"]<-"Junco hyemalis"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Junco hyemalis aikeni"]<-"Junco hyemalis" #OK 
+
+
+#Eastern Towhee
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Eastern Towhee (Red-eyed)"]<-"Eastern Towhee"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Pipilo erythrophthalmus erythrophthalmus/canaster"]<-"Pipilo erythrophthalmus" #OK 
+
+
+#Fox Sparrow
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Fox Sparrow (Red)"]<-"Fox Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Fox Sparrow (Slate-colored)"]<-"Fox Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Passerella iliaca iliaca/zaboria"]<-"Passerella iliaca"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Passerella iliaca [schistacea Group]"]<-"Passerella iliaca"#OK 
+#OK 
+
+
+
+#Gadwall
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Gadwall (Common)"]<-"Gadwall"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Anas strepera strepera"]<-"Anas strepera"#OK 
+
+#Graylag Goose
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Graylag Goose (Domestic type)"]<-"Graylag Goose"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Anser anser (Domestic type)"]<-"Anser anser"#OK 
+
+
+
+#Great Blue Heron
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Great Blue Heron (Blue form)"]<-"Great Blue Heron"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Great Blue Heron (White form)"]<-"Great Blue Heron"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Ardea herodias [herodias Group]"]<-"Ardea herodias"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Ardea herodias occidentalis"]<-"Ardea herodias"#OK 
+
+#Great Egret
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Great Egret (American)"]<-"Great Egret"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Ardea alba egretta"]<-"Ardea alba"#OK 
+
+
+
+#Green-winged Teal
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Green-winged Teal (American)"]<-"Green-winged Teal"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Green-winged Teal (Eurasian)"]<-"Green-winged Teal"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Anas crecca carolinensis"]<-"Anas crecca"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Anas crecca crecca/nimia"]<-"Anas crecca"#OK 
+
+
+#Iceland Gull
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Iceland Gull (kumlieni)"]<-"Iceland Gull"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Larus glaucoides kumlieni"]<-"Larus glaucoides"#OK 
+
+#Mallard
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Mallard (Domestic type)"]<-"Mallard"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Anas platyrhynchos (Domestic type)"]<-"Anas platyrhynchos"#OK 
+
+
+#Nelson's Sparrow
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Nelson's Sparrow (Atlantic Coast)"]<-"Nelson's Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Ammodramus nelsoni subvirgatus"]<-"Ammodramus nelsoni"#OK 
+
+#Northern Bobwhite
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Bobwhite (Eastern)"]<-"Northern Bobwhite"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Colinus virginianus [virginianus Group]"]<-"Colinus virginianus"#OK 
+
+
+#Northern Flicker
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Flicker (intergrade)"]<-"Northern Flicker"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Flicker (Red-shafted)"]<-"Northern Flicker"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Flicker (Yellow-shafted)"]<-"Northern Flicker"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Colaptes auratus luteus x cafer"]<-"Colaptes auratus"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Colaptes auratus [cafer Group]"]<-"Colaptes auratus"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Colaptes auratus auratus/luteus"]<-"Colaptes auratus"#OK 
+
+
+#Northern Goshawk
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Goshawk (American)"]<-"Northern Goshawk"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Accipiter gentilis atricapillus/laingi"]<-"Accipiter gentilis"#OK 
+
+#Northern Shrike
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Northern Shrike (American)"]<-"Northern Shrike"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Lanius excubitor borealis/invictus"]<-"Lanius excubitor"#OK 
+
+
+#Palm Warbler
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Palm Warbler (Western)"]<-"Palm Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Palm Warbler (Yellow)"]<-"Palm Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga palmarum palmarum"]<-"Setophaga palmarum"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga palmarum hypochrysea"]<-"Setophaga palmarum"#OK 
+
+#Peregrine Falcon
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Peregrine Falcon (North American)"]<-"Peregrine Falcon"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Falco peregrinus anatum"]<-"Falco peregrinus"#OK 
+
+#Red-winged Blackbird
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Red-winged Blackbird (Red-winged)"]<-"Red-winged Blackbird"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Agelaius phoeniceus [phoeniceus Group]"]<-"Agelaius phoeniceus"#OK 
+
+#Rock Pigeon
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Rock Pigeon (Feral Pigeon)"]<-"Rock Pigeon"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Columba livia (Feral Pigeon)"]<-"Columba livia"#OK 
+
+
+#Savannah Sparrow
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Savannah Sparrow (Ipswich)"]<-"Savannah Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Savannah Sparrow (Savannah)"]<-"Savannah Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Passerculus sandwichensis princeps"]<-"Passerculus sandwichensis"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Passerculus sandwichensis [sandwichensis Group]"]<-"Passerculus sandwichensis"#OK 
+
+
+#Tundra Swan
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Tundra Swan (Whistling)"]<-"Tundra Swan"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Cygnus columbianus columbianus"]<-"Cygnus columbianus"#OK 
+
+#White-crowned Sparrow
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="White-crowned Sparrow (Gambel's)"]<-"White-crowned Sparrow"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Zonotrichia leucophrys gambelii"]<-"Zonotrichia leucophrys"#OK 
+
+#Wild Turkey
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Wild Turkey (Domestic type)"]<-"Wild Turkey"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Meleagris gallopavo (Domestic type)"]<-"Meleagris gallopavo"#OK 
+
+#Willet
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Willet (Western)"]<-"Willet"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Tringa semipalmata inornata"]<-"Tringa semipalmata"#OK 
+
+
+#Yellow Warbler
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Yellow Warbler (Northern)"]<-"Yellow Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga petechia [aestiva Group]"]<-"Setophaga petechia"#OK 
+
+#Yellow-rumped Warbler
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Yellow-rumped Warbler (Audubon's)"]<-"Yellow-rumped Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Yellow-rumped Warbler (Myrtle x Audubon's)"]<-"Yellow-rumped Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Yellow-rumped Warbler (Myrtle)"]<-"Yellow-rumped Warbler"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga coronata auduboni"]<-"Setophaga coronata"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga coronata coronata x auduboni"]<-"Setophaga coronata"
+BH_CBC_2022_sprm [BH_CBC_2022_sprm =="Setophaga coronata coronata"]<-"Setophaga coronata"#OK 
+
+
+
+```
+
+
+
+```{r}
+###########################################################################################
+### Standardizing BETWEEN BBS and CBC
+########################################################################################
+
+BH_BBS_APRIL_2022_FINAL <- read.csv("C:/Users/Shannon/Desktop/BH_April_2022/BH_BBS_APRIL_2022_FINAL.csv")
+
+
+#Yellow-rumped Warbler
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="(Myrtle Warbler) Yellow-rumped Warbler"]<-"Yellow-rumped Warbler"
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="Setophaga coronata coronata"]<-"Setophaga coronata"
+#Dark-eyed Junco
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="(Slate-colored Junco) Dark-eyed Junco"]<-"Dark-eyed Junco"
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="Junco hyemalis hyemalis"]<-"Junco hyemalis"
+#Northern Flicker
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="(Yellow-shafted Flicker) Northern Flicker"]<-"Northern Flicker"
+BH_BBS_APRIL_2022_FINAL[BH_BBS_APRIL_2022_FINAL =="Colaptes auratus auratus"]<-"Colaptes auratus"
+
+
+##################################################################################
+### Lets compare the lists
+################################################################################
+setwd("C:/Users/Shannon/Desktop/BH_April_2022")
+
+CBC_new_list<-as.data.frame((BH_CBC_2022_sprm %>% select(COM_NAME, SCI_NAME)))
+CBC_new_list<-unique(CBC_new_list)###413 species
+
+BBS_new_list<-as.data.frame((BH_BBS_APRIL_2022_FINAL %>% select(English_Common_Name, Gen_spe)))
+BBS_new_list<-unique(BBS_new_list) ###229
+
+write.csv(CBC_diff_from_BBS, file="BC_diff_from_BBS.csv", row.names = F)
+
+### Find where they intersect in common name and thats what will give us the different sci names
+intersect(CBC_diff_from_BBS$English_Common_Name, BBS_new_list$English_Common_Name)
+
+### Downy Woodpecker
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Picoides pubescens"]<-"Dryobates pubescens"
+
+### Northern Harrier
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Circus cyaneus"]<-"Circus hudsonius"
+
+### Hairy Woodpecker
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Picoides villosus"]<-"Dryobates villosus"
+
+### Gadwall
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Anas strepera"]<-"Mareca strepera"
+
+### Sandhill Crane
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Grus canadensis"]<-"Antigone canadensis"
+
+### Seaside Sparrow
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Ammodramus maritimus"]<-"Ammospiza maritima"
+
+
+### Saltmarsh Sparrow
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Ammodramus caudacutus"]<-"Ammospiza caudacuta"
+
+### Blue-winged Teal
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Anas discors"]<-"Spatula discors"
+
+### Nelson's Sparrow
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Ammodramus nelsoni subvirgatus"]<-"Ammospiza nelsoni"
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Ammodramus nelsoni"]<-"Ammospiza nelsoni"
+
+### Nashville Warbler
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Oreothlypis ruficapilla"]<-"Leiothlypis ruficapilla"
+
+### Henslow's Sparrow
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Ammodramus henslowii"]<-"Centronyx henslowii"
+
+### Tennessee Warbler
+BH_CBC_2022_sprm[BH_CBC_2022_sprm=="Oreothlypis peregrina"]<-"Leiothlypis peregrina"
+
+
+BBS<-select(BH_BBS_APRIL_2022_FINAL, Route_ID, Year, SpeciesTotal, English_Common_Name, Gen_spe, Latitude, Longitude, Season)
+
+colnames(BBS)<-colnames(BH_CBC_2022_sprm)
+
+full_set<-rbind(BBS, BH_CBC_2022_sprm)#915,796 obs
+
+spp<-select(full_set, COM_NAME, SCI_NAME, Season)
+
+spp<-unique(spp)
+
+### visually inspect all names to make sure they align
+write.csv(spp, file="spp_compare.csv", row.names = F)
+
+#Gray Jay to Canada Jay but everything else is PERFECT!
+
+full_set[full_set =="Gray Jay"]<-"Canada Jay"
+
+write.csv(full_set, file="Full_BH_Filtered_2023.csv", row.names = F)
+
+```
+
+```{r}
+Full_BH_Filtered_2023 <- read.csv("~/Desktop/BH_June_2023/Filtered_BH_2023/Full_BH_Filtered_2023.csv")
+
+###aggregate species total by abundance by year
+abund_totals<-as.data.frame(aggregate(how_many ~ COM_NAME+Year, data = Full_BH_Filtered_2023, FUN = sum))
+
+###Grab the values less than 5 (these are going to be considered rare species)
+spp_to_remove<-dplyr::filter(abund_totals, how_many<=5)
+
+###Grab unique names
+spp_to_remove_list<-unique(spp_to_remove$COM_NAME) ###203 species to remove
+
+###Remove the species that occur less than 4 times per year
+Full_BH_Filtered_2023<-as.data.frame(Full_BH_Filtered_2023 %>% filter(!COM_NAME %in% spp_to_remove_list)) #902,706 obs
+
+###Double check to make sure this is correct
+intersect(Full_BH_Filtered_2023$COM_NAME, spp_to_remove_list) ###character(0) if correct
+
+###Clean up
+rm(abund_totals, spp_to_remove, spp_to_remove_list)
+
+###
+Full_BH_Filtered_2023$how_many<-ifelse(Full_BH_Filtered_2023$how_many>0,1,Full_BH_Filtered_2023$how_many)
+
+###library(maditr)
+
+BH_long <- dcast(Full_BH_Filtered_2023,Route_ID+Latitude+Longitude+Year+Season~COM_NAME,value.var = "how_many")
+
+write.csv(BH_long, file="BH_Binary_2023.csv", row.names = F)
+
+#238 species (down from 251 from previous dataset)
+
+
+
+
+```
+
+
+
+
+```{r}
+################################################################
+### Random sampling to calculate dissimilarity between CBC and BBS 
+###############################################################
+
+###Load data
+BH_Binary <- read.csv("~/Desktop/BH_June_2023/Filtered_BH_2023/BH_Binary_2023.csv", check.names = F)#12,810 observations
+
+###Packages
+#library(vegan) #dissimilarity (now a dependency of betapart)
+library(betapart) # dissimilarity indices 
+library(dplyr) #df manipulation
+library(geosphere) #Distance between lat and lons
+
+###30 years of data
+yearlist<-c(1990:2019)
+
+### open data frame to capture the data
+df_main = data.frame() #this data frame will be 30k rows in length storing the mean of 100 samples, 1000x, this is the data frame where the statistical models will be from
+
+###This data frame will hold the proportion of each species for each season per every loop run - this df will be 300k rows in length once finished
+df_species_occ = data.frame() 
+
+### Species names
+species<-colnames(BH_Binary)[6:243]
+
+### Separate by season
+winter<-dplyr::filter(BH_Binary, Season=="Winter")
+summer<-dplyr::filter(BH_Binary, Season=="Breeding")
+
+### Clean
+rm(BH_Binary)
+
+##############################################################################################
+### By year 1000 random samples between winter and summer
+#############################################################################################
+sim_length<-c(1:50) #length of simulation, serves as a loop iteration counter
+
+numbers<-c(1:100)#number index / place holder for how many samples grabbed between winter and breeding season per year
+
+### First loop initiates the number of times the samples will be grabbed (1000 simulations for each year)
+for (j in 1:(length(sim_length))){
+
+### 2nd loop cycles by 30 years (1990-2019) x 30 years
+for (i in 1:(length(yearlist))){
+
+###grab each season by year - for consistency, ALWAYS put CBC first, since we start with prior winter to following breeding season  
+w_by_year<-subset(winter, subset=winter$Year==yearlist[i])
+s_by_year<-subset(summer, subset=summer$Year==yearlist[i])
+
+# the number in which we we subset the CBC data set 
+BBS_num<-as.numeric(nrow(s_by_year))
+
+# randomly select the same  number as BBS for  a) a more balanced sample plus to keep geographically consistant sampling.--> number of surveys conducted for each survey did not significantly change over time. Therefore, since BBS always had the fewer numbers of surveys each year we made a random subset of the CBC data to the same number of BBS surveys to avoid sampling bias.
+w_by_year<-w_by_year[sample(nrow(w_by_year),BBS_num),]
+
+
+###internal set of declarations to hold 100 random sample values
+r_sor<-length(numbers) #100 values of Sorenson dissimilarity calculated from random winter and breeding samples in a given year
+r_turn<-length(numbers) #100 values of Sorenson turnover calculated from random winter and breeding samples in a given year
+r_nest<-length(numbers) #100 values of Sorenson nestedness calculated from random winter and breeding samples in a given year
+winter_only<-length(numbers) #100 values of the proportion of species that are only found on winter surveys in a given year
+breeding_only<-length(numbers)#100 values of the proportion of species that are only found on breeding surveys in a given year
+shared<-length(numbers)#100 values of the proportion of species that are found on both surveys in a given year
+neither<-length(numbers) #100 values of the proportion of species that are found on neither surveys in a given year
+
+### Throughout the year
+richness_all<-length(numbers)
+richness_w<-length(numbers) ### winter richness
+richness_s<-length(numbers) ### breeding richness
+
+### 3rd loop indicates that we will cycles through the samples 100 times for each year 
+for (k in 1:(length(numbers))){
+
+###grab random rows
+random_winter<-w_by_year[sample(nrow(w_by_year), 1), ]
+random_summer<-s_by_year[sample(nrow(s_by_year), 1), ]
+
+###row bind
+comp_df<-rbind(random_winter,random_summer)
+
+### Get distance between the two randomly sampled points and convert to km
+samp_dist<-as.numeric(distm(c(comp_df$Longitude[1], comp_df$Latitude[1]), c(comp_df$Longitude[2], comp_df$Latitude[2]), fun=distHaversine))/1000
+
+comp_df<-comp_df[6:243]
+
+### convery any numbers greater than 1 to 1 (dark eyed junco hybrids recorded on same survey)
+comp_df<-comp_df %>% mutate_if(is.numeric, ~1 * (. != 0))
+
+### Get winter or summer values from subtracting the rows and then dividing by the total number of species of total species pool (238)
+vals_for_win_or_summer<-as.numeric(comp_df[1, ] - comp_df[2, ])
+
+### Get shared by both by getting values of 2 from column sums 
+shared_by_both<-as.numeric(colSums(comp_df))
+
+### Calculate row sums to get the species richness
+richness<-rowSums(comp_df)
+
+richness_w<-as.numeric(richness[1]) #winter richness
+richness_s<-as.numeric(richness[2]) # breeding richness
+
+### concatenate the vectors which gives 4 unique species occurrence options:"1,1" (winter only), "-1,1" (breeding only), "0,2" (occurs on both), "0,0" (does not appear) 
+season_occ<-paste(vals_for_win_or_summer, shared_by_both, sep=",")
+
+###Replace the 4 different categories with terms that are more intuitive 
+season_occ [season_occ =="1,1"]<-"winter_only"
+season_occ [season_occ =="-1,1"]<-"breeding_only"
+season_occ [season_occ =="0,2"]<-"both"
+season_occ [season_occ =="0,0"]<-"neither"
+
+### Convert to data frame
+season_occ<-as.data.frame(season_occ)
+
+### richness shared between both seasons
+richness_both<-as.numeric(length(which(season_occ==c("both"))))
+### Transpose the data frame from column to rows to match the species matrix
+season_occ<-t(season_occ)
+
+### Column bind the season_occ, yearlist and number of random samples #yearlist(i), sim(j)
+x2<-cbind(season_occ, richness_w, richness_s, richness_both, samp_dist,  yearlist[i], numbers[k], sim_length[j])
+
+### Row bind this to the open data frame for each run of the loop
+df_species_occ=rbind(df_species_occ, x2)
+
+###Beta diversity calculations for pairwise winter and breeding sample
+beta_sample<-beta.pair(comp_df, index.family="sor")
+
+###Stores 100 beta_sample values for each declaration
+r_sor[k]<-as.numeric(beta_sample[3])
+r_turn[k]<-as.numeric(beta_sample[1])
+r_nest[k]<-as.numeric(beta_sample[2])
+
+### get the proportion of species that are only found on winter surveys
+winter_only[k]<-as.numeric(length(which(vals_for_win_or_summer==1)))/238 ###251 is the number of species (winter only is row1 - row2=1)
+
+### get the proportion of species that are only found on breeding surveys
+breeding_only[k]<-as.numeric(length(which(vals_for_win_or_summer==-1)))/238 ###(breeding only is row1 - row2=-1)
+
+### get the proportion of species that are found on both surveys
+shared[k]<-as.numeric(length(which(shared_by_both==2)))/238 ###(shared is row1 + row2 = 2)
+
+#mean and standard deviation from 100 samples
+sim_sor<-mean(r_sor)
+sim_sd<-sd(r_sor)
+sim_turn<-mean(r_turn)
+sim_turn_sd<-sd(r_turn)
+sim_nest<-mean(r_nest)
+sim_nest_sd<-sd(r_nest)
+sim_prop_winter<-mean(winter_only)
+sim_prop_winter_sd<-sd(winter_only)
+sim_prop_breeding<-mean(breeding_only)
+sim_prop_breeding_sd<-sd(breeding_only)
+sim_prop_both<-mean(shared)
+sim_prop_both_sd<-sd(shared)
+
+
+### combine these calcs which will becoming a new row for the open data frame outside to outer for loop
+x_main<-cbind(sim_sor, sim_sd, sim_turn, sim_turn_sd, sim_nest, sim_nest_sd, sim_prop_winter, sim_prop_winter_sd, sim_prop_breeding, sim_prop_breeding_sd, sim_prop_both,sim_prop_both_sd, sim_length[j], yearlist[i])}
+
+
+df_main=rbind(df_main, x_main)}}#last step binds each iteration of the code to the open data frame  
+
+colnames(df_main)[13:14]<-c("sim_length", "year")
+colnames(df_species_occ)[1:238]<-species
+colnames(df_species_occ)[243:245]<-c("year", "numbers", "sim_length")
+
+
+write.csv(df_main, file="BH_main_stats_june_2023.csv", row.names = F)
+write.csv(df_species_occ, file = "BH_species_occ_june_2023.csv", row.names = F)
+
+
+Full_BH_Filtered_2023 <- read.csv("~/Desktop/BH_June_2023/Filtered_BH_2023/Full_BH_Filtered_2023.csv")
+
+
+
+##################################################
+#### STATS
+##################################################
+
+BH_main_data <- read.csv("~/Desktop/BH_Aug_2023/Data/BH_main_data.csv", check.names = FALSE)
+
+result <- BH_season_stats_main_2024 %>%
+  group_by(year, season) %>%
+  summarize(
+    mean_turnover = mean(turnover, na.rm = TRUE),
+    mean_nestedness = mean(nestedness, na.rm = TRUE),
+    mean_sor = mean(sor, na.rm = TRUE)
+  )
+
+winter<-filter(result, season==c("winter"))
+
+breeding<-filter(result, season==c("breeding"))
+
+
+### winter
+
+w_sor <- glm(mean_sor ~ year, data=winter, family = gaussian())
+w_turn <- glm(mean_turnover ~ year, data=winter, family = gaussian())
+w_nest <- glm(mean_nestedness ~ year, data=winter, family = gaussian())
+
+s_sor <- glm(mean_sor ~ year, data=breeding, family = gaussian())
+s_turn <- glm(mean_turnover ~ year, data=breeding, family = gaussian())
+s_nest <- glm(mean_nestedness ~ year, data=breeding, family = gaussian())
+
+
+library(dplyr)
+stat_file<-as.data.frame(BH_main_data %>%
+   group_by(year, sim) %>% 
+   summarise_at(vars("sor", "turnover", "nestedness", "winter_only", "breeding_only", "shared", "neither"), mean))
+
+
+stat_file2<-as.data.frame(stat_file %>%
+   group_by(year) %>% 
+   summarise_at(vars("sor", "turnover", "nestedness", "winter_only", "breeding_only", "shared", "neither"), mean))
+
+
+###Proportion of Specyes
+result2 <- BH_main_data %>%
+  group_by(year) %>%
+  summarize(
+    mean_winter_only = mean(winter_only, na.rm = TRUE),
+    mean_breeding_only = mean(breeding_only, na.rm = TRUE),
+    mean_shared = mean(shared, na.rm = TRUE),
+    mean_neither = mean(neither, na.rm = TRUE)
+  )
+
+
+
+winter_only <- glm(mean_winter_only ~ year, data=result2, family = gaussian())
+breeding_only <- glm(mean_breeding_only ~ year, data=result2, family = gaussian())
+shared <- glm(mean_shared ~ year, data=result2, family = gaussian())
+neither <- glm(mean_neither ~ year, data=result2, family = gaussian())
+
+
+
+```
+
+
+
+
+```{r}
+### Prop of each species by years
+
+### Declarations
+species_list<-colnames(BH_main_data)[1:238]
+sim_list<-c(1:1000)
+yearlist<-c(1990:2019)
+
+setwd("~/Desktop/BH_Aug_2023/Data/spp_occupancy_data")
+
+for (i in 1:length(yearlist)){
+
+by_year<-dplyr::filter(BH_main_data, year==yearlist[i])
+
+for (j in 1:length(sim_list)){
+  
+by_sim<-dplyr::filter(by_year, sim==sim_list[j])
+
+
+shared<-length(species_list)
+breeding_only<-length(species_list)
+winter_only<-length(species_list)
+neither<-length(species_list)
+
+
+for (k in 1:length(species_list)){
+
+by_spp<-dplyr::select(by_sim, species_list[k])  
+  
+shared[k]<-as.numeric(length(which(by_spp == "both")))
+breeding_only[k]<-as.numeric(length(which(by_spp == "breeding_only")))
+winter_only[k]<-as.numeric(length(which(by_spp == "winter_only")))
+neither[k]<-as.numeric(length(which(by_spp == "neither")))
+
+spp_group_by_year<-as.data.frame(cbind(species_list, shared, winter_only, breeding_only, neither, yearlist[i], sim_list[j]))
+
+colnames(spp_group_by_year)<-c("species", "shared", "winter_only", "breeding_only", "neither", "year", "sim")
+
+name_of_file<-paste("spp_prop_by_year_", yearlist[i],"_", sim_list[j],".csv", sep = "")
+
+write.csv(spp_group_by_year, file=name_of_file, row.names = F)
+
+}}}
+
+
+```
+
+
+```{r}
+species_occ <- read.csv("~/Desktop/BH_Aug_2023/Data/species_occ_full_sept_2023.csv")
+
+occ_file<-as.data.frame(species_occ %>%
+   group_by(species,year) %>% 
+   summarise_at(vars("shared", "winter_only", "breeding_only", "neither"), mean))
+
+###############################################################
+### Linear Models of proportion change of each species over time
+###############################################################
+
+### Slope
+both_slope<-length(species_list)
+winter_slope<-length(species_list)
+breeding_slope<-length(species_list)
+neither_slope<-length(species_list)
+
+###sd
+both_sd<-length(species_list)
+winter_sd<-length(species_list)
+breeding_sd<-length(species_list)
+neither_sd<-length(species_list)
+
+### P_values
+both_p<-length(species_list)
+winter_p<-length(species_list)
+breeding_p<-length(species_list)
+neither_p<-length(species_list)
+
+### r2 values
+both_r2<-length(species_list)
+winter_r2<-length(species_list)
+breeding_r2<-length(species_list)
+neither_r2<-length(species_list)
+
+
+species_list<-unique(occ_file$species)
+
+
+for (i in 1:length(species_list)){
+ 
+by_spp<-dplyr::filter(occ_file, species==species_list[i])
+
+### Models
+both_lm<- lm(shared~year, data=by_spp)
+winter_lm<-lm(winter_only~year, data=by_spp)
+breeding_lm<-lm(breeding_only~year, data=by_spp)
+neither_lm<-lm(neither~year, data=by_spp)
+
+### Slope
+both_slope[i]<-as.numeric(both_lm$coefficients[2])
+winter_slope[i]<-as.numeric(winter_lm$coefficients[2])
+breeding_slope[i]<-as.numeric(breeding_lm$coefficients[2])
+neither_slope[i]<-as.numeric(neither_lm$coefficients[2])
+
+###sd
+both_sd[i]<-as.numeric(summary(both_lm)$coefficients[,2][2])
+winter_sd[i]<-as.numeric(summary(winter_lm)$coefficients[,2][2])
+breeding_sd[i]<-as.numeric(summary(breeding_lm)$coefficients[,2][2])
+neither_sd[i]<-as.numeric(summary(neither_lm)$coefficients[,2][2])
+
+### P_values
+both_p[i]<-as.numeric(summary(both_lm)$coefficients[,4][2])
+winter_p[i]<-as.numeric(summary(winter_lm)$coefficients[,4][2])
+breeding_p[i]<-as.numeric(summary(breeding_lm)$coefficients[,4][2])
+neither_p[i]<-as.numeric(summary(neither_lm)$coefficients[,4][2])
+
+### r2 values
+both_r2[i]<-as.numeric(summary(both_lm)$adj.r.squared)
+winter_r2[i]<-as.numeric(summary(winter_lm)$adj.r.squared)
+breeding_r2[i]<-as.numeric(summary(breeding_lm)$adj.r.squared)
+neither_r2[i]<-as.numeric(summary(neither_lm)$adj.r.squared)
+
+
+}
+
+
+species_model_out<-as.data.frame(cbind(species_list, both_slope, both_sd, both_p, both_r2, winter_slope, winter_sd, winter_p, winter_r2, breeding_slope, breeding_sd, breeding_p, breeding_r2, neither_slope, neither_sd, neither_p, neither_r2))
+
+
+write.csv(species_model_out, file="species_model_out_2023.csv", row.names = F)
+```
+
+
